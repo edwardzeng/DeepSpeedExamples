@@ -23,8 +23,8 @@ from transformers import (
 import deepspeed
 from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 
-sys.path.append(
-    os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
+
 from utils.data.data_utils import create_prompt_dataset
 from utils.utils import print_rank_0, to_device, save_hf_format, set_random_seed, get_all_reduce_mean, get_optimizer_grouped_parameters, save_zero_three_model
 from utils.ds_utils import get_train_ds_config
@@ -180,13 +180,11 @@ def main():
 
     args.global_rank = torch.distributed.get_rank()
 
-    ds_config = get_train_ds_config(offload=args.offload,
-                                    stage=args.zero_stage)
-    ds_config[
-        'train_micro_batch_size_per_gpu'] = args.per_device_train_batch_size
-    ds_config[
-        'train_batch_size'] = args.per_device_train_batch_size * torch.distributed.get_world_size(
-        ) * args.gradient_accumulation_steps
+    ds_config = get_train_ds_config(offload=args.offload, stage=args.zero_stage)
+    ds_config['train_micro_batch_size_per_gpu'] = args.per_device_train_batch_size
+    get_world_size = torch.distributed.get_world_size()
+    train_batch_size = args.per_device_train_batch_size * get_world_size * args.gradient_accumulation_steps
+    ds_config['train_batch_size'] = train_batch_size
 
     # If passed along, set the training seed now.
     set_random_seed(args.seed)
@@ -195,16 +193,13 @@ def main():
 
     torch.distributed.barrier()
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path,
-                                              fast_tokenizer=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, fast_tokenizer=True)
     tokenizer.pad_token = tokenizer.eos_token
 
-    model = create_hf_model(AutoModelForCausalLM, args.model_name_or_path,
-                            tokenizer, ds_config)
+    model = create_hf_model(AutoModelForCausalLM, args.model_name_or_path, tokenizer, ds_config)
 
     if args.lora_dim > 0:
-        model = convert_linear_layer_to_lora(model, args.lora_module_name,
-                                             args.lora_dim)
+        model = convert_linear_layer_to_lora(model, args.lora_module_name, args.lora_dim)
         if args.only_optimize_lora:
             model = only_optimize_lora_parameters(model)
 
@@ -253,16 +248,12 @@ def main():
         return perplexity
 
     # Split weights in two groups, one with weight decay and the other not.
-    optimizer_grouped_parameters = get_optimizer_grouped_parameters(
-        model, args.weight_decay)
+    optimizer_grouped_parameters = get_optimizer_grouped_parameters(model, args.weight_decay)
 
     AdamOptimizer = DeepSpeedCPUAdam if args.offload else FusedAdam
-    optimizer = AdamOptimizer(optimizer_grouped_parameters,
-                              lr=args.learning_rate,
-                              betas=(0.9, 0.95))
+    optimizer = AdamOptimizer(optimizer_grouped_parameters, lr=args.learning_rate, betas=(0.9, 0.95))
 
-    num_update_steps_per_epoch = math.ceil(
-        len(train_dataloader) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     lr_scheduler = get_scheduler(
         name=args.lr_scheduler_type,
         optimizer=optimizer,
@@ -283,9 +274,7 @@ def main():
 
     # Train!
     print_rank_0("***** Running training *****", args.global_rank)
-    print_rank_0(
-        f"***** Evaluating perplexity, Epoch {0}/{args.num_train_epochs} *****",
-        args.global_rank)
+    print_rank_0(f"***** Evaluating perplexity, Epoch {0}/{args.num_train_epochs} *****", args.global_rank)
     perplexity = evaluation(model, eval_dataloader)
     print_rank_0(f"ppl: {perplexity}", args.global_rank)
 
@@ -302,9 +291,7 @@ def main():
             model.step()
 
         # Evaluate perplexity on the validation set.
-        print_rank_0(
-            f"***** Evaluating perplexity, Epoch {epoch+1}/{args.num_train_epochs} *****",
-            args.global_rank)
+        print_rank_0(f"***** Evaluating perplexity, Epoch {epoch+1}/{args.num_train_epochs} *****", args.global_rank)
         perplexity = evaluation(model, eval_dataloader)
         print_rank_0(f"ppl: {perplexity}", args.global_rank)
         model.tput_timer.update_epoch_count()
@@ -318,10 +305,7 @@ def main():
 
         if args.zero_stage == 3:
             # For zero stage 3, each gpu only has a part of the model, so we need a special save function
-            save_zero_three_model(model,
-                                  args.global_rank,
-                                  args.output_dir,
-                                  zero_stage=args.zero_stage)
+            save_zero_three_model(model, args.global_rank, args.output_dir, zero_stage=args.zero_stage)
 
 
 if __name__ == "__main__":

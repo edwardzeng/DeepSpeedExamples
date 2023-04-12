@@ -33,9 +33,9 @@ class LinearLayer_LoRA(nn.Module):
             rows, columns = weight.ds_shape
         except:
             rows, columns = weight.shape
-        self.lora_right_weight = nn.Parameter(torch.zeros(
-            columns,
-            lora_dim))  # apply transpose so in forward we do not need to
+        
+        # apply transpose so in forward we do not need to
+        self.lora_right_weight = nn.Parameter(torch.zeros(columns, lora_dim))
         self.lora_left_weight = nn.Parameter(torch.zeros(lora_dim, rows))
         self.lora_scaling = lora_scaling / lora_dim
 
@@ -121,12 +121,11 @@ def convert_lora_to_linear_layer(model):
     for name in repalce_name:
         module = recursive_getattr(model, name)
         zero_stage_3 = hasattr(module.weight, 'ds_id')
-        with deepspeed.zero.GatheredParameters(_z3_params_to_fetch([
-                module.weight, module.bias, module.lora_left_weight,
-                module.lora_right_weight
-        ]),
-                                               modifier_rank=0,
-                                               enabled=zero_stage_3):
+        params_to_fetch = _z3_params_to_fetch([
+            module.weight, module.bias, module.lora_left_weight,
+            module.lora_right_weight
+        ])
+        with deepspeed.zero.GatheredParameters(params_to_fetch, modifier_rank=0, enabled=zero_stage_3):
             module.fuse_lora_weight()
     return model
 
