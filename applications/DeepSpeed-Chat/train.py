@@ -116,9 +116,7 @@ def get_zero_stage(args, step_num):
 
 def get_output_dir(args, step_num):
     model_size = get_model_size(args, step_num)
-    output_dir = os.path.join(args.output_dir,
-                              f"{model_type[step_num]}-models",
-                              f"{model_size}")
+    output_dir = os.path.join(args.output_dir, f"{model_type[step_num]}-models", f"{model_size}")
     return output_dir
 
 

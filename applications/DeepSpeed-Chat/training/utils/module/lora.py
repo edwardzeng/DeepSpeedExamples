@@ -8,6 +8,7 @@ from torch import nn
 import torch.nn.functional as F
 from deepspeed.compression.helper import recursive_getattr, recursive_setattr
 import deepspeed
+from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 
 
 class LinearLayer_LoRA(nn.Module):
@@ -24,9 +25,7 @@ class LinearLayer_LoRA(nn.Module):
         self.bias = bias
 
         if lora_dim <= 0:
-            raise ValueError(
-                "You are training to use LoRA, whose reduced dim should be larger than 1"
-            )
+            raise ValueError("You are training to use LoRA, whose reduced dim should be larger than 1")
 
         try:
             # for zero stage 3
@@ -65,23 +64,19 @@ class LinearLayer_LoRA(nn.Module):
 
     def fuse_lora_weight(self):
         if not self.fuse_lora:
-            self.weight.data += self.lora_scaling * torch.matmul(
-                self.lora_left_weight.t(), self.lora_right_weight.t())
+            self.weight.data += self.lora_scaling * torch.matmul(self.lora_left_weight.t(), self.lora_right_weight.t())
         self.fuse_lora = True
 
     def unfuse_lora_weight(self):
         if self.fuse_lora:
-            self.weight.data -= self.lora_scaling * torch.matmul(
-                self.lora_left_weight.t(), self.lora_right_weight.t())
+            self.weight.data -= self.lora_scaling * torch.matmul(self.lora_left_weight.t(), self.lora_right_weight.t())
         self.fuse_lora = False
 
     def forward(self, input):
         if self.fuse_lora:
             return F.linear(input, self.weight, self.bias)
         else:
-            return F.linear(
-                input, self.weight,
-                self.bias) + (self.lora_dropout(input) @ self.lora_right_weight
+            return F.linear(input, self.weight, self.bias) + (self.lora_dropout(input) @ self.lora_right_weight
                               @ self.lora_left_weight) * self.lora_scaling
 
 
@@ -95,11 +90,12 @@ def convert_linear_layer_to_lora(model,
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear) and part_module_name in name:
             repalce_name.append(name)
+
     for name in repalce_name:
         module = recursive_getattr(model, name)
         tmp = LinearLayer_LoRA(
             module.weight, lora_dim, lora_scaling, lora_droppout,
-            module.bias).to(module.weight.device).to(module.weight.dtype)
+            module.bias).to(device=module.weight.device, dtype=module.weight.dtype)
         recursive_setattr(model, name, tmp)
     return model
 
@@ -107,8 +103,7 @@ def convert_linear_layer_to_lora(model,
 def _z3_params_to_fetch(param_list):
     return [
         p for p in param_list
-        if hasattr(p, 'ds_id') and p.ds_status == deepspeed.runtime.zero.
-        partition_parameters.ZeroParamStatus.NOT_AVAILABLE
+        if hasattr(p, 'ds_id') and p.ds_status == ZeroParamStatus.NOT_AVAILABLE
     ]
 
 

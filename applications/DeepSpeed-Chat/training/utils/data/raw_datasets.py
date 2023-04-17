@@ -147,8 +147,7 @@ class DahoasSyntheticinstructgptjpairwiseDataset(PromptRawDataset):
         return " Human: " + sample['prompt'] + " Assistant: " + sample['chosen']
 
     def get_prompt_and_rejected(self, sample):
-        return " Human: " + sample['prompt'] + " Assistant: " + sample[
-            'rejected']
+        return " Human: " + sample['prompt'] + " Assistant: " + sample['rejected']
 
 
 # English dataset
@@ -242,8 +241,7 @@ class OpenaiWebgptcomparisonsDataset(PromptRawDataset):
             response = sample['answer_1']
         response = re.sub(r" [\(\[].*?[\)\]]", "", response)
         response = re.sub(r"[\(\[].*?[\)\]]", "", response)
-        return " Human: " + sample['question'][
-            'full_text'] + " Assistant: " + response
+        return " Human: " + sample['question']['full_text'] + " Assistant: " + response
 
     def get_prompt_and_rejected(self, sample):
         if float(sample['score_0']) < float(sample['score_1']):
@@ -252,8 +250,7 @@ class OpenaiWebgptcomparisonsDataset(PromptRawDataset):
             response = sample['answer_1']
         response = re.sub(r" [\(\[].*?[\)\]]", "", response)
         response = re.sub(r"[\(\[].*?[\)\]]", "", response)
-        return " Human: " + sample['question'][
-            'full_text'] + " Assistant: " + response
+        return " Human: " + sample['question']['full_text'] + " Assistant: " + response
 
 
 # English dataset
@@ -350,8 +347,7 @@ class Wangrui6ZhihuKOLDataset(PromptRawDataset):
 
     def get_prompt_and_chosen(self, sample):
         if sample['INSTRUCTION'] is not None and sample['RESPONSE'] is not None:
-            return " Human: " + sample[
-                'INSTRUCTION'] + " Assistant: " + sample['RESPONSE']
+            return " Human: " + sample['INSTRUCTION'] + " Assistant: " + sample['RESPONSE']
         return None
 
     def get_prompt_and_rejected(self, sample):
@@ -386,12 +382,10 @@ class CohereMiraclzhqueries2212Dataset(PromptRawDataset):
         return " " + sample['negative_passages'][0]['text']
 
     def get_prompt_and_chosen(self, sample):
-        return " Human: " + sample['query'] + " Assistant: " + sample[
-            'positive_passages'][0]['text']
+        return " Human: " + sample['query'] + " Assistant: " + sample['positive_passages'][0]['text']
 
     def get_prompt_and_rejected(self, sample):
-        return " Human: " + sample['query'] + " Assistant: " + sample[
-            'negative_passages'][0]['text']
+        return " Human: " + sample['query'] + " Assistant: " + sample['negative_passages'][0]['text']
 
 
 # Chinese dataset
@@ -440,10 +434,8 @@ class HelloSimpleAIHC3ChineseDataset(PromptRawDataset):
         return None
 
     def get_prompt_and_chosen(self, sample):
-        if sample['question'] is not None and sample['human_answers'][
-                0] is not None:
-            return " Human: " + sample['question'] + " Assistant: " + sample[
-                'human_answers'][0]
+        if sample['question'] is not None and sample['human_answers'][0] is not None:
+            return " Human: " + sample['question'] + " Assistant: " + sample['human_answers'][0]
         return None
 
     def get_prompt_and_rejected(self, sample):
@@ -502,8 +494,7 @@ class MkqaChineseDataset(PromptRawDataset):
         if sample['queries']['zh_cn'] is not None and sample['answers'][
                 'zh_cn'][0]['text'] is not None:
             return " Human: " + sample['queries'][
-                'zh_cn'] + " Assistant: " + sample['answers']['zh_cn'][0][
-                    'text']
+                'zh_cn'] + " Assistant: " + sample['answers']['zh_cn'][0]['text']
         return None
 
     def get_prompt_and_rejected(self, sample):
@@ -561,8 +552,7 @@ class MkqaJapaneseDataset(PromptRawDataset):
     def get_prompt_and_chosen(self, sample):
         if sample['queries']['ja'] is not None and sample['answers']['ja'][0][
                 'text'] is not None:
-            return " Human: " + sample['queries'][
-                'ja'] + " Assistant: " + sample['answers']['ja'][0]['text']
+            return " Human: " + sample['queries']['ja'] + " Assistant: " + sample['answers']['ja'][0]['text']
         return None
 
     def get_prompt_and_rejected(self, sample):
@@ -597,12 +587,10 @@ class CohereMiracljaqueries2212Dataset(PromptRawDataset):
         return " " + sample['negative_passages'][0]['text']
 
     def get_prompt_and_chosen(self, sample):
-        return " Human: " + sample['query'] + " Assistant: " + sample[
-            'positive_passages'][0]['text']
+        return " Human: " + sample['query'] + " Assistant: " + sample['positive_passages'][0]['text']
 
     def get_prompt_and_rejected(self, sample):
-        return " Human: " + sample['query'] + " Assistant: " + sample[
-            'negative_passages'][0]['text']
+        return " Human: " + sample['query'] + " Assistant: " + sample['negative_passages'][0]['text']
 
 
 # Japanese dataset
@@ -633,8 +621,7 @@ class LmqgQgjaquadDataset(PromptRawDataset):
         return None
 
     def get_prompt_and_chosen(self, sample):
-        return " Human: " + sample['question'] + " Assistant: " + sample[
-            'sentence']
+        return " Human: " + sample['question'] + " Assistant: " + sample['sentence']
 
     def get_prompt_and_rejected(self, sample):
         print(
@@ -671,8 +658,7 @@ class LmqgQagjaquadDataset(PromptRawDataset):
         return None
 
     def get_prompt_and_chosen(self, sample):
-        return " Human: " + sample['questions'][0] + " Assistant: " + sample[
-            'paragraph']
+        return " Human: " + sample['questions'][0] + " Assistant: " + sample['paragraph']
 
     def get_prompt_and_rejected(self, sample):
         print(

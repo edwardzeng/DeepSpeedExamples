@@ -17,13 +17,10 @@ class RewardModel(nn.Module):
         if hasattr(self.config, "word_embed_proj_dim"):
             # `OPT` models use word_embed_proj_dim as final output
             # https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py#L497
-            self.v_head = nn.Linear(self.config.word_embed_proj_dim,
-                                    1,
-                                    bias=False)
+            self.v_head = nn.Linear(self.config.word_embed_proj_dim, 1, bias=False)
         else:
             # `gpt-neo(x)` models use `hidden_size` attribute names instead of `n_embd``
-            self.config.n_embd = self.config.hidden_size if hasattr(
-                self.config, "hidden_size") else self.config.n_embd
+            self.config.n_embd = self.config.hidden_size if hasattr(self.config, "hidden_size") else self.config.n_embd
             self.v_head = nn.Linear(self.config.n_embd, 1, bias=False)
         self.rwtranrsformer = base_model
         self.PAD_ID = tokenizer.pad_token_id
@@ -76,9 +73,11 @@ class RewardModel(nn.Module):
             rejected_reward = rejected_rewards[i]
 
             c_inds = (chosen_id == self.PAD_ID).nonzero()
-            c_ind = c_inds[self.num_padding_at_beginning].item() if len(
-                c_inds
-            ) > self.num_padding_at_beginning else seq_len  # OPT model pads the first token, so we need to use the seoncd padding token as the end of the sequence
+            # OPT model pads the first token, so we need to use the seoncd padding token as the end of the sequence
+            if len(c_inds) > self.num_padding_at_beginning:
+                c_ind = c_inds[self.num_padding_at_beginning].item()
+            else:
+                c_ind = seq_len
             check_divergence = (chosen_id != rejected_id).nonzero()
 
             if len(check_divergence) == 0:
@@ -88,19 +87,19 @@ class RewardModel(nn.Module):
             else:
                 # Check if there is any padding otherwise take length of sequence
                 r_inds = (rejected_id == self.PAD_ID).nonzero()
-                r_ind = r_inds[self.num_padding_at_beginning].item(
-                ) if len(r_inds) > self.num_padding_at_beginning else seq_len
+                if len(r_inds) > self.num_padding_at_beginning:
+                    r_ind = r_inds[self.num_padding_at_beginning].item()
+                else:
+                    r_ind = seq_len
                 end_ind = max(c_ind, r_ind)
                 divergence_ind = check_divergence[0]
             assert divergence_ind > 0
             c_truncated_reward = chosen_reward[divergence_ind:end_ind]
             r_truncated_reward = rejected_reward[divergence_ind:end_ind]
-            chosen_mean_scores.append(
-                chosen_reward[c_ind - 1])  #use the end score for refrnence
+            chosen_mean_scores.append(chosen_reward[c_ind - 1])  #use the end score for refrnence
             rejected_mean_scores.append(rejected_reward[r_ind - 1])
 
-            loss += -torch.log(
-                torch.sigmoid(c_truncated_reward - r_truncated_reward)).mean()
+            loss += -torch.log(torch.sigmoid(c_truncated_reward - r_truncated_reward)).mean()
 
         loss = loss / bs
         chosen_mean_scores = torch.stack(chosen_mean_scores)
@@ -139,16 +138,15 @@ class RewardModel(nn.Module):
             assert prompt_length > 1, "prompt_length must be greater than 1 to help select the end score"
             bs = values.size(0)
             seq_len = input_ids.shape[1]
-            chosen_end_scores = [
-            ]  # we use this name for consistency with the original forwad function
+            chosen_end_scores = []  # we use this name for consistency with the original forwad function
             for i in range(bs):
                 input_id = input_ids[i]
                 value = values[i]
 
                 c_inds = (input_id[prompt_length:] == self.PAD_ID).nonzero()
-                # here we only use the answer part of the sequence so we do not need to care about the padding at the beginning
-                c_ind = c_inds[0].item() + prompt_length if len(
-                    c_inds) > 0 else seq_len
+                # here we only use the answer part of the sequence
+                # so we do not need to care aboutthe padding at the beginning
+                c_ind = c_inds[0].item() + prompt_length if len(c_inds) > 0 else seq_len
                 chosen_end_scores.append(value[c_ind - 1])
             return {
                 "values": values,

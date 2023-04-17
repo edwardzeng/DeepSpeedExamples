@@ -141,8 +141,7 @@ def print_utils(gen_output):
         print()
 
 
-def prompt_eval(args, model_baseline, model_fintuned, tokenizer, device,
-                prompts):
+def prompt_eval(args, model_baseline, model_fintuned, tokenizer, device, prompts):
     for prompt in prompts:
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
         print("==========Baseline: Greedy=========")
@@ -209,13 +208,10 @@ def main():
 
     device = torch.device("cuda:0")
     config = AutoConfig.from_pretrained(args.model_name_or_path_baseline)
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path_baseline,
-                                              fast_tokenizer=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path_baseline, fast_tokenizer=True)
 
-    model_baseline = get_model(config, args.model_name_or_path_baseline,
-                               tokenizer)
-    model_fintuned = get_model(config, args.model_name_or_path_finetune,
-                               tokenizer)
+    model_baseline = get_model(config, args.model_name_or_path_baseline, tokenizer)
+    model_fintuned = get_model(config, args.model_name_or_path_finetune, tokenizer)
 
     model_baseline.to(device)
     model_fintuned.to(device)
@@ -251,8 +247,7 @@ def main():
             "Human: 鳥が冬に南に移動するのはなぜですか? Assistant:"
         ]
 
-    prompt_eval(args, model_baseline, model_fintuned, tokenizer, device,
-                prompts)
+    prompt_eval(args, model_baseline, model_fintuned, tokenizer, device, prompts)
 
 
 if __name__ == "__main__":

@@ -18,39 +18,29 @@ from . import raw_datasets
 
 def get_raw_dataset(dataset_name, output_path, seed, local_rank):
     if dataset_name == "Dahoas/rm-static":
-        return raw_datasets.DahoasRmstaticDataset(output_path, seed,
-                                                  local_rank)
+        return raw_datasets.DahoasRmstaticDataset(output_path, seed, local_rank)
     elif dataset_name == "Dahoas/full-hh-rlhf":
-        return raw_datasets.DahoasFullhhrlhfDataset(output_path, seed,
-                                                    local_rank)
+        return raw_datasets.DahoasFullhhrlhfDataset(output_path, seed, local_rank)
     elif dataset_name == "Dahoas/synthetic-instruct-gptj-pairwise":
-        return raw_datasets.DahoasSyntheticinstructgptjpairwiseDataset(
-            output_path, seed, local_rank)
+        return raw_datasets.DahoasSyntheticinstructgptjpairwiseDataset(output_path, seed, local_rank)
     elif dataset_name == "yitingxie/rlhf-reward-datasets":
-        return raw_datasets.YitingxieRlhfrewarddatasetsDataset(
-            output_path, seed, local_rank)
+        return raw_datasets.YitingxieRlhfrewarddatasetsDataset(output_path, seed, local_rank)
     elif dataset_name == "openai/webgpt_comparisons":
-        return raw_datasets.OpenaiWebgptcomparisonsDataset(
-            output_path, seed, local_rank)
+        return raw_datasets.OpenaiWebgptcomparisonsDataset(output_path, seed, local_rank)
     elif dataset_name == "stanfordnlp/SHP":
-        return raw_datasets.StanfordnlpSHPDataset(output_path, seed,
-                                                  local_rank)
+        return raw_datasets.StanfordnlpSHPDataset(output_path, seed, local_rank)
     elif dataset_name == "wangrui6/Zhihu-KOL":
-        return raw_datasets.Wangrui6ZhihuKOLDataset(output_path, seed,
-                                                    local_rank)
+        return raw_datasets.Wangrui6ZhihuKOLDataset(output_path, seed, local_rank)
     elif dataset_name == "Cohere/miracl-zh-queries-22-12":
-        return raw_datasets.CohereMiraclzhqueries2212Dataset(
-            output_path, seed, local_rank)
+        return raw_datasets.CohereMiraclzhqueries2212Dataset(output_path, seed, local_rank)
     elif dataset_name == "Hello-SimpleAI/HC3-Chinese":
-        return raw_datasets.HelloSimpleAIHC3ChineseDataset(
-            output_path, seed, local_rank)
+        return raw_datasets.HelloSimpleAIHC3ChineseDataset(output_path, seed, local_rank)
     elif dataset_name == "mkqa-Chinese":
         return raw_datasets.MkqaChineseDataset(output_path, seed, local_rank)
     elif dataset_name == "mkqa-Japanese":
         return raw_datasets.MkqaJapaneseDataset(output_path, seed, local_rank)
     elif dataset_name == "Cohere/miracl-ja-queries-22-12":
-        return raw_datasets.CohereMiracljaqueries2212Dataset(
-            output_path, seed, local_rank)
+        return raw_datasets.CohereMiracljaqueries2212Dataset(output_path, seed, local_rank)
     elif dataset_name == "lmqg/qg_jaquad":
         return raw_datasets.LmqgQgjaquadDataset(output_path, seed, local_rank)
     elif dataset_name == "lmqg/qag_jaquad":
@@ -81,8 +71,7 @@ def get_raw_dataset_split_index(local_rank, output_path, dataset_name, seed,
         splits = [split / splits_sum for split in splits]
         splits_index = [0]
         for index, split in enumerate(splits):
-            splits_index.append(splits_index[index] +
-                                int(round(split * float(data_size))))
+            splits_index.append(splits_index[index] + int(round(split * float(data_size))))
         diff = splits_index[-1] - data_size
         for index in range(1, len(splits_index)):
             splits_index[index] -= diff
@@ -93,9 +82,7 @@ def get_raw_dataset_split_index(local_rank, output_path, dataset_name, seed,
             shuffle_idx_split_file_name = f"{output_path}/{dataset_name}_seed{seed}_{split_name}_{data_split}_{split_i}.npy"
             shuffle_idx_split = shuffle_idx[
                 splits_index[split_i]:splits_index[split_i + 1]]
-            np.save(shuffle_idx_split_file_name,
-                    shuffle_idx_split,
-                    allow_pickle=True)
+            np.save(shuffle_idx_split_file_name, shuffle_idx_split, allow_pickle=True)
     torch.distributed.barrier()
     index = np.load(index_file_name, allow_pickle=True)
     return index.tolist()
@@ -129,12 +116,10 @@ class PromptDataset(Dataset):
             return self.chosen_dataset[idx]["input_ids"], self.chosen_dataset[idx]["attention_mask"], \
                 self.reject_dataset[idx]["input_ids"], self.reject_dataset[idx]["attention_mask"]
         elif self.train_phase == 3:
-            return self.prompt_dataset[idx]["input_ids"],self.prompt_dataset[idx]["attention_mask"], \
-                self.pad_token_id
+            return self.prompt_dataset[idx]["input_ids"], self.prompt_dataset[idx]["attention_mask"], self.pad_token_id
 
 
-def create_dataset_split(current_dataset, raw_dataset, train_phase, tokenizer,
-                         end_of_conversation_token, max_seq_len):
+def create_dataset_split(current_dataset, raw_dataset, train_phase, tokenizer, end_of_conversation_token, max_seq_len):
     prompt_dataset = []
     chosen_dataset = []
     reject_dataset = []
@@ -150,10 +135,8 @@ def create_dataset_split(current_dataset, raw_dataset, train_phase, tokenizer,
                                          padding="max_length",
                                          truncation=True,
                                          return_tensors="pt")
-                chosen_token["input_ids"] = chosen_token["input_ids"].squeeze(
-                    0)
-                chosen_token["attention_mask"] = chosen_token[
-                    "attention_mask"].squeeze(0)
+                chosen_token["input_ids"] = chosen_token["input_ids"].squeeze(0)
+                chosen_token["attention_mask"] = chosen_token["attention_mask"].squeeze(0)
                 chosen_dataset.append(chosen_token)
 
     elif train_phase == 2:
@@ -195,15 +178,12 @@ def create_dataset_split(current_dataset, raw_dataset, train_phase, tokenizer,
                 for key_word in ["input_ids", "attention_mask"]:
                     length = prompt_token[key_word].size()[-1]
                     if length > max_seq_len:
-                        y = prompt_token[key_word].squeeze(0)[length -
-                                                              (max_seq_len -
-                                                               1):].flip(0)
+                        y = prompt_token[key_word].squeeze(0)[length - (max_seq_len - 1):].flip(0)
                     else:
                         y = prompt_token[key_word].squeeze(0).flip(0)
                     prompt_token[key_word] = y
                 prompt_dataset.append(prompt_token)
-    return PromptDataset(prompt_dataset, chosen_dataset, reject_dataset,
-                         tokenizer.pad_token_id, train_phase)
+    return PromptDataset(prompt_dataset, chosen_dataset, reject_dataset, tokenizer.pad_token_id, train_phase)
 
 
 def create_dataset(local_rank, dataset_name, data_split, output_path,
@@ -334,12 +314,8 @@ class DataCollatorReward:
 
     def __call__(self, data):
         batch = {}
-        batch["input_ids"] = torch.cat([f[0]
-                                        for f in data] + [f[2] for f in data],
-                                       dim=0)
-        batch["attention_mask"] = torch.cat([f[1] for f in data] +
-                                            [f[3] for f in data],
-                                            dim=0)
+        batch["input_ids"] = torch.cat([f[0] for f in data] + [f[2] for f in data], dim=0)
+        batch["attention_mask"] = torch.cat([f[1] for f in data] + [f[3] for f in data], dim=0)
         return batch
 
 
@@ -353,25 +329,15 @@ class DataCollatorRLHF:
         batch = {}
         pad_token_id = data[-1][-1]
 
-        prompt = pad_sequence([f[0] for f in data],
-                              padding_value=pad_token_id,
-                              batch_first=True)
-        prompt_mask = pad_sequence([f[1] for f in data],
-                                   padding_value=0,
-                                   batch_first=True)
+        prompt = pad_sequence([f[0] for f in data], padding_value=pad_token_id, batch_first=True)
+        prompt_mask = pad_sequence([f[1] for f in data], padding_value=0, batch_first=True)
 
         ### make sure the final ouput is a seqence of 2**?
         length = prompt.size()[-1]
         pad_length = self.max_token_len - length
         if pad_length > 0:
-            batch["prompt"] = F.pad(prompt,
-                                    pad=(pad_length, 0),
-                                    mode='constant',
-                                    value=pad_token_id)
-            batch["prompt_att_mask"] = F.pad(prompt_mask,
-                                             pad=(pad_length, 0),
-                                             mode='constant',
-                                             value=0)
+            batch["prompt"] = F.pad(prompt, pad=(pad_length, 0), mode='constant', value=pad_token_id)
+            batch["prompt_att_mask"] = F.pad(prompt_mask, pad=(pad_length, 0), mode='constant', value=0)
         else:
             batch["prompt"] = prompt
             batch["prompt_att_mask"] = prompt_mask
@@ -451,16 +417,14 @@ class MiniDataset:
                 large_size = len(large_batch)
             for i in range(0, large_size, self.small_batch_size):
                 if type(large_batch) == list or type(large_batch) == tuple:
-                    small_dataset.append(
-                        [x[i:i + self.small_batch_size] for x in large_batch])
+                    small_dataset.append([x[i:i + self.small_batch_size] for x in large_batch])
                 elif type(large_batch) == dict:
                     small_dataset.append({
                         k: v[i:i + self.small_batch_size]
                         for k, v in large_batch.items()
                     })
                 else:
-                    small_dataset.append(large_batch[i:i +
-                                                     self.small_batch_size])
+                    small_dataset.append(large_batch[i:i + self.small_batch_size])
         self.free()
 
         return small_dataset
@@ -473,9 +437,7 @@ class MiniDataset:
             else:
                 return None
         else:
-            raise ValueError(
-                "The dataset is full but we did not stop it. There is a bug in the code."
-            )
+            raise ValueError("The dataset is full but we did not stop it. There is a bug in the code.")
 
     def free(self):
         self.dataset = []
