@@ -40,7 +40,7 @@ def gather_log_probs(logits, labels):
 
 
 class DeepSpeedPPOTrainer():
-
+    """PPOTrainer"""
     def __init__(self, rlhf_engine, args):
         self.rlhf_engine = rlhf_engine
         self.actor_model = self.rlhf_engine.actor
@@ -61,7 +61,7 @@ class DeepSpeedPPOTrainer():
         self.lam = 0.95
 
     def _generate_sequence(self, prompts):
-
+        """generate sequence"""
         max_min_length = self.max_answer_seq_len + prompts.shape[1]
 
         with torch.no_grad():
@@ -72,6 +72,8 @@ class DeepSpeedPPOTrainer():
         # NOTE: this will causes each GPU has different number of examples
         batch_size = seq.shape[0]
         prompt_length = prompts.shape[1]
+
+        # seq的结果包含了prompt本身，所以答案需要去除prompt
         ans = seq[:, prompt_length:]
         self.prompt_length = prompt_length
         valid_ans_len = (ans != self.tokenizer.pad_token_id).sum(dim=-1)
@@ -90,8 +92,7 @@ class DeepSpeedPPOTrainer():
         seq = self._generate_sequence(prompts)
         self.train()
 
-        pad_token_id = self.tokenizer.pad_token_id
-        attention_mask = seq.not_equal(pad_token_id).long()
+        attention_mask = seq.not_equal(self.tokenizer.pad_token_id).long()
 
         with torch.no_grad():
             output = self.actor_model(seq, attention_mask=attention_mask)
@@ -116,7 +117,7 @@ class DeepSpeedPPOTrainer():
         }
 
     def compute_rewards(self, prompts, log_probs, ref_log_probs, reward_score, action_mask):
-
+        """compute_rewards"""
         kl_divergence_estimate = -self.kl_ctl * (log_probs - ref_log_probs)
         rewards = kl_divergence_estimate
         start = prompts.shape[1] - 1
@@ -149,6 +150,8 @@ class DeepSpeedPPOTrainer():
 
         ### process the new outputs
         batch = {'input_ids': seq, "attention_mask": attention_mask}
+
+        # actor_model
         actor_prob = self.actor_model(**batch, use_cache=False).logits
         actor_log_prob = gather_log_probs(actor_prob[:, :-1, :], inputs['input_ids'][:, 1:])
         actor_loss = self.actor_loss_fn(
@@ -159,6 +162,8 @@ class DeepSpeedPPOTrainer():
         )
         self.actor_model.backward(actor_loss)
         self.actor_model.step()
+
+        # critic_model
         value = self.critic_model.forward_value(**batch, return_value_only=True,  use_cache=False)[:, :-1]
         critic_loss = self.critic_loss_fn(
             value[:, start:],
@@ -238,7 +243,7 @@ class DeepSpeedPPOTrainer():
 
 
 class DeepSpeedPPOTrainerUnsupervised(DeepSpeedPPOTrainer):
-
+    """PPOTrainerUnsupervised"""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
