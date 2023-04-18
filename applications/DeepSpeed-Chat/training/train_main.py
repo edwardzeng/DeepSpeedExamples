@@ -1,8 +1,9 @@
 #!/usr/bin/env python
-# Copyright (c) Microsoft Corporation.
-# SPDX-License-Identifier: Apache-2.0
-
-# DeepSpeed Team
+# -*- coding: utf8 -*-
+"""
+File: train_main.py
+Date: 2023/04/18
+"""
 import argparse
 import os
 import math
@@ -13,20 +14,20 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 
 from transformers import (
+    AutoModelForCausalLM,
     AutoTokenizer,
     SchedulerType,
+    default_data_collator,
     get_scheduler,
 )
 
 import deepspeed
 from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
-
-from utils.model.model_utils import create_critic_model
+from utils.model.model_utils import create_hf_model, create_critic_model
 from utils.data.data_utils import create_prompt_dataset, DataCollatorReward
-from utils.utils import print_rank_0, to_device, save_hf_format, set_random_seed, get_all_reduce_mean
-from utils.utils import get_optimizer_grouped_parameters, save_zero_three_model
+from utils.utils import print_rank_0, to_device, save_hf_format, set_random_seed
+from utils.utils import get_all_reduce_mean, get_optimizer_grouped_parameters, save_zero_three_model
 from utils.ds_utils import get_train_ds_config
 from utils.module.lora import convert_linear_layer_to_lora, convert_lora_to_linear_layer, only_optimize_lora_parameters
 
@@ -51,10 +52,18 @@ def parse_args():
         'and 20% for phase 3.'
     )
     parser.add_argument(
+        '--sft_only_data_path',
+        nargs='*',
+        default=[],
+        help='Path to the dataset for only using in SFT phase.'
+    )
+    parser.add_argument(
         '--data_output_path',
         type=str,
         default='/tmp/data_files/',
-        help='Where to store the data-related files such as shuffle index.'
+        help=
+        'Where to store the data-related files such as shuffle index. \
+            This needs to be on a local storage of a node (not on a shared storage)'
     )
     parser.add_argument(
         "--model_name_or_path",
@@ -92,8 +101,9 @@ def parse_args():
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=5e-5,
-        help="Initial learning rate (after the potential warmup period) to use.",
+        default=1e-3,
+        help=
+        "Initial learning rate (after the potential warmup period) to use, default stage 1: 1e-3, stage 2: 5e-5.",
     )
     parser.add_argument(
         "--weight_decay",
@@ -147,7 +157,7 @@ def parse_args():
     parser.add_argument(
         '--gradient_checkpointing',
         action='store_true',
-        help='Enable HF gradient checkpointing for Actor model.'
+        help='Enable HF gradient checkpointing for model.'
     )
     # deepspeed features
     parser.add_argument(
@@ -188,6 +198,12 @@ def parse_args():
             not args.only_optimize_lora
         ), "--gradient_checkpointing and --only_optimizer_lora cannot be enabled at the same time."
 
+    parser.add_argument(
+        "--train_phase",
+        type=int,
+        default=1,
+        help="1: supervised finetuning, 2: reward model finetuning, 3: rlhf finetuning"
+    )
     return args
 
 
@@ -220,46 +236,85 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, fast_tokenizer=True)
     tokenizer.pad_token = tokenizer.eos_token
 
-    model = create_critic_model(args.model_name_or_path, tokenizer, ds_config, args.num_padding_at_beginning)
+    if args.train_phase == 1:
+        model = create_hf_model(AutoModelForCausalLM, args.model_name_or_path, tokenizer, ds_config)
+    elif args.train_phase == 2:
+        model = create_critic_model(args.model_name_or_path, tokenizer, ds_config, args.num_padding_at_beginning)
+    elif args.train_phase == 3:
+        pass
+    else:
+        raise ValueError(f"Invalid train phase: {args.train_phase}, valid values: 1, 2, 3")
 
     if args.lora_dim > 0:
         model = convert_linear_layer_to_lora(model, args.lora_module_name, args.lora_dim)
         if args.only_optimize_lora:
             model = only_optimize_lora_parameters(model)
 
-    train_phase = 2
+    # Prepare the data
     train_dataset, eval_dataset = create_prompt_dataset(
         args.local_rank,
         args.data_path,
         args.data_split,
         args.data_output_path,
-        train_phase,
+        args.train_phase,
         args.seed,
         tokenizer,
-        args.max_seq_len
+        args.max_seq_len,
+        sft_only_data_path=args.sft_only_data_path
     )
 
     # DataLoaders creation:
-    data_collator = DataCollatorReward()
+    if args.train_phase == 1:
+        data_collator = default_data_collator
+    elif args.train_phase == 2:
+        data_collator = DataCollatorReward()
+    else:
+        # data_collator = 
+        pass
+
     if args.local_rank == -1:
         train_sampler = RandomSampler(train_dataset)
         eval_sampler = SequentialSampler(eval_dataset)
     else:
         train_sampler = DistributedSampler(train_dataset)
         eval_sampler = DistributedSampler(eval_dataset)
+
+    if args.train_phase == 2:
+        eval_sampler = SequentialSampler(eval_dataset)
+
     train_dataloader = DataLoader(
         train_dataset,
         collate_fn=data_collator,
         sampler=train_sampler,
         batch_size=args.per_device_train_batch_size
     )
-    eval_sampler = SequentialSampler(eval_dataset)
     eval_dataloader = DataLoader(
         eval_dataset,
         collate_fn=data_collator,
         sampler=eval_sampler,
         batch_size=args.per_device_eval_batch_size
     )
+
+    def evaluation(model, eval_dataloader):
+        model.eval()
+        losses = 0
+        for step, batch in enumerate(eval_dataloader):
+            batch = to_device(batch, device)
+            with torch.no_grad():
+                outputs = model(**batch)
+
+            loss = outputs.loss
+            losses += loss.float()
+        losses = losses / (step + 1)
+        try:
+            perplexity = torch.exp(losses)
+        except OverflowError:
+            perplexity = float("inf")
+        try:
+            perplexity = get_all_reduce_mean(perplexity).item()
+        except:
+            pass
+        return perplexity
 
     def evaluation_reward(model, eval_dataloader):
         model.eval()
@@ -287,6 +342,7 @@ def main():
             pass
         return scores, acc
 
+
     # Split weights in two groups, one with weight decay and the other not.
     optimizer_grouped_parameters = get_optimizer_grouped_parameters(model, args.weight_decay)
 
@@ -294,7 +350,6 @@ def main():
     optimizer = AdamOptimizer(optimizer_grouped_parameters, lr=args.learning_rate, betas=(0.9, 0.95))
 
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-
     lr_scheduler = get_scheduler(
         name=args.lr_scheduler_type,
         optimizer=optimizer,
@@ -316,10 +371,14 @@ def main():
 
     # Train!
     print_rank_0("***** Running training *****", args.global_rank)
+    print_rank_0(f"***** Evaluating perplexity, Epoch {0}/{args.num_train_epochs} *****", args.global_rank)
 
-    print_rank_0(f"***** Evaluating reward, Epoch {0}/{args.num_train_epochs} *****", args.global_rank)
-    reward_score, acc = evaluation_reward(model, eval_dataloader)
-    print_rank_0(f"chosen_last_scores: {reward_score}, acc: {acc}, higher is better", args.global_rank)
+    if args.train_phase == 1:
+        perplexity = evaluation(model, eval_dataloader)
+        print_rank_0(f"ppl: {perplexity}", args.global_rank)
+    elif args.train_phase == 2:
+        reward_score, acc = evaluation_reward(model, eval_dataloader)
+        print_rank_0(f"chosen_last_scores: {reward_score}, acc: {acc}, higher is better", args.global_rank)
 
     for epoch in range(args.num_train_epochs):
         epoch_desc = f"{epoch + 1}/{args.num_train_epochs}"
@@ -329,25 +388,31 @@ def main():
         for step, batch in enumerate(train_dataloader):
             batch = to_device(batch, device)
             outputs = model(**batch, use_cache=False)
-            loss = outputs["loss"]
+            loss = outputs.loss
             model.backward(loss)
             model.step()
             mean_loss += loss.item()
-        print_rank_0(f"Epoch {epoch_desc} with loss {mean_loss/(step+1)}", args.global_rank)
-        # Evaluate reward_loss on the validation set.
-        print_rank_0(f"***** Evaluating reward, Epoch {epoch_desc} *****", args.global_rank)
-        reward_score, acc = evaluation_reward(model, eval_dataloader)
-        print_rank_0(f"chosen_last_scores: {reward_score}, acc: {acc}, higher is better", args.global_rank)
+        
+        print_rank_0(f"Epoch {epoch_desc} with loss {mean_loss / (step + 1)}", args.global_rank)
+
+        # Evaluate model on the validation set.
+        if args.train_phase == 1:
+            perplexity = evaluation(model, eval_dataloader)
+            print_rank_0(f"Epoch {epoch_desc} ppl: {perplexity}", args.global_rank)
+        elif args.train_phase == 2:
+            reward_score, acc = evaluation_reward(model, eval_dataloader)
+            print_rank_0(f"chosen_last_scores: {reward_score}, acc: {acc}, higher is better", args.global_rank)
         model.tput_timer.update_epoch_count()
 
     if args.output_dir is not None:
-        print_rank_0('saving model ...', args.global_rank)
+        print_rank_0('saving the final model ...', args.global_rank)
         model = convert_lora_to_linear_layer(model)
 
         if args.global_rank == 0:
             save_hf_format(model, tokenizer, args)
+
         if args.zero_stage == 3:
-            # for zero stage 3, each gpu only has a part of the model
+            # For zero stage 3, each gpu only has a part of the model
             # so we need to save the model on each gpu by using DS-Engine
             save_zero_three_model(model, args.global_rank, args.output_dir, zero_stage=args.zero_stage)
 
