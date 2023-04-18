@@ -342,8 +342,13 @@ def parse_args():
 def create_datasets(args, tokenizer, train_phase=3):
     unsupervised_training_enabled = args.unsupervised_dataset_name and args.unsupervised_dataset_config_name
     prompt_train_dataset, _ = create_prompt_dataset(
-        args.local_rank, args.data_path, args.data_split,
-        args.data_output_path, train_phase, args.seed, tokenizer,
+        args.local_rank,
+        args.data_path,
+        args.data_split,
+        args.data_output_path,
+        train_phase,
+        args.seed,
+        tokenizer,
         args.max_prompt_seq_len
     )
     if unsupervised_training_enabled:
@@ -361,6 +366,7 @@ def create_datasets(args, tokenizer, train_phase=3):
         prompt_train_sampler = DistributedSampler(prompt_train_dataset)
         if unsupervised_training_enabled:
             unsupervised_train_sampler = DistributedSampler(unsupervised_train_dataset)
+
     prompt_train_dataloader = DataLoader(
         prompt_train_dataset,
         collate_fn=data_collator,
@@ -435,8 +441,8 @@ def main():
 
     # first number is how many experience-batch to generate
     # second number is the training batch size, which is the micro-batch size used
-    exp_mini_dataset = MiniDataset(args.generation_batch_numbers, args.per_device_mini_train_batch_size)
-    unsup_mini_dataset = MiniDataset(args.generation_batch_numbers, args.per_device_mini_train_batch_size)
+    experience_mini_dataset = MiniDataset(args.generation_batch_numbers, args.per_device_mini_train_batch_size)
+    unsupervised_mini_dataset = MiniDataset(args.generation_batch_numbers, args.per_device_mini_train_batch_size)
 
     # Train!
     print_rank_0("***** Running training *****", args.global_rank)
@@ -445,32 +451,34 @@ def main():
         epoch_desc = {epoch+1}/{args.num_train_epochs}
         gen_batches = min(len(prompt_train_dataloader), len(unsuper_train_dataloader))
         print_rank_0(f"Beginning of Epoch {epoch_desc}, Total Generation Batches {gen_batches}", args.global_rank)
+
         for step, (batch_prompt, batch_unsuper) in enumerate(zip(prompt_train_dataloader, unsuper_train_dataloader)):
             batch_prompt = to_device(batch_prompt, device)
             if batch_unsuper is not None:
                 batch_unsuper = to_device(batch_unsuper, device)
-                unsup_dataset = unsup_mini_dataset.add(batch_unsuper)
+                unsupervised_dataset = unsupervised_mini_dataset.add(batch_unsuper)
             else:
-                unsup_dataset = unsup_mini_dataset.add([[None] * args.per_device_train_batch_size])
+                unsupervised_dataset = unsupervised_mini_dataset.add([[None] * args.per_device_train_batch_size])
+
             prompts = batch_prompt['prompt']
             length = prompts.size(-1)
             if length > args.max_prompt_seq_len:
                 prompts = prompts[:, length - args.max_prompt_seq_len:]
                 raise ValueError("Prompt length is too long")
 
+            # 用上一个epoch的actor模型根据prompt生成接下来PPO训练用的buffer数据
             out = trainer.generate_experience(prompts)
-            exp_dataset = exp_mini_dataset.add(out)
+            experience_dataset = experience_mini_dataset.add(out)
 
-            if exp_dataset is not None:
-                inner_iter = 0
+            if experience_dataset is not None:
                 critic_loss, actor_loss, unsuper_loss = 0, 0, 0
-                average_reward = 0
+                average_reward, inner_iter_count = 0
 
                 if args.actor_gradient_checkpointing:
                     rlhf_engine.actor.gradient_checkpointing_enable()
 
                 for ppo_ep in range(args.ppo_epochs):
-                    for i, (exp_data, unsup_data) in enumerate(zip(exp_dataset, unsup_dataset)):
+                    for exp_data, unsup_data in zip(experience_dataset, unsupervised_dataset):
                         actor_loss, critic_loss = trainer.train_rlhf(exp_data)
                         critic_loss += actor_loss.item()
                         actor_loss += critic_loss.item()
@@ -480,22 +488,22 @@ def main():
                             unsup_loss = trainer.train_unsupervised(unsup_data, args.unsup_coef)
                             unsuper_loss += unsup_loss.item()
 
-                        inner_iter += 1
+                        inner_iter_count += 1
                         if args.enable_ema:
                             moving_average(rlhf_engine.actor, rlhf_engine.actor_ema, zero_stage=args.actor_zero_stage)
 
-                    random.shuffle(exp_dataset)
-                    random.shuffle(unsup_dataset)
+                    random.shuffle(experience_dataset)
+                    random.shuffle(unsupervised_dataset)
 
-                act_loss = actor_loss / inner_iter
-                cri_loss = critic_loss / inner_iter
-                unsuper_loss = unsuper_loss / inner_iter
+                act_loss = actor_loss / inner_iter_count
+                cri_loss = critic_loss / inner_iter_count
+                unsuper_loss = unsuper_loss / inner_iter_count
                 print_rank_0(
                     f'epoch: {epoch}|step: {step}|ppo_ep: {ppo_ep+1}|act_loss: {act_loss}|cri_loss: {cri_loss}|unsuper_loss: {unsuper_loss}',
                     args.global_rank
                 )
                 average_reward = get_all_reduce_mean(average_reward).item()
-                print_rank_0(f"average reward score: {average_reward/inner_iter}", args.global_rank)
+                print_rank_0(f"average reward score: {average_reward / inner_iter_count}", args.global_rank)
                 print_rank_0("-" * 80, args.global_rank)
 
             if args.actor_gradient_checkpointing:

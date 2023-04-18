@@ -124,8 +124,7 @@ class DeepSpeedRLHFEngine():
             # If actor is ZeRO-3 then we use it for everything, otherwise assume we have enough memory for ref model
             zero_stage = 0
         ds_config = get_eval_ds_config(self.args.offload_reference_model, zero_stage)
-        ds_config[
-            'train_micro_batch_size_per_gpu'] = self.args.per_device_mini_train_batch_size
+        ds_config['train_micro_batch_size_per_gpu'] = self.args.per_device_mini_train_batch_size
         #TODO(jeff): we should probably set grad accumlation steps here as well for clarity
         ds_config['train_batch_size'] = self.args.per_device_mini_train_batch_size * torch.distributed.get_world_size(
             ) * self.args.gradient_accumulation_steps_actor
