@@ -125,7 +125,7 @@ def get_script(args, step_num):
     script = os.path.join(
         os.getcwd(),
         step_dirs[step_num],
-        "training_scripts",
+        "training_scripts/opt/",
         args.deployment_type,
         f"run_{model_size}.sh",
     )
@@ -179,7 +179,7 @@ def launch_cmd(args, step_num, cmd):
             f"If you are seeing an OOM error, try modifying {get_script(args, step_num)}:",
             "  - Reduce `--per_device_*_batch_size`",
             "  - Increase `--zero_stage {0,1,2,3}` on multi-gpu setups",
-            "  - Enable `--gradient_checkpointing` or `--only_optimizer_lora`"
+            "  - Enable `--gradient_checkpointing` or `--only_optimize_lora`"
         )))
 
 

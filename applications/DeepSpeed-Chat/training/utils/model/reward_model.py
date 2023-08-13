@@ -41,13 +41,18 @@ class RewardModel(nn.Module):
                 use_cache=False):
         loss = None
 
+        if self.config.model_type == "llama":
+            kwargs = dict()
+        else:
+            kwargs = dict(head_mask=head_mask)
+
         transformer_outputs = self.rwtranrsformer(
             input_ids,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
-            head_mask=head_mask,
             inputs_embeds=inputs_embeds,
-            use_cache=use_cache)
+            use_cache=use_cache,
+            **kwargs)
 
         hidden_states = transformer_outputs[0]
         rewards = self.v_head(hidden_states).squeeze(-1)
@@ -96,10 +101,10 @@ class RewardModel(nn.Module):
             assert divergence_ind > 0
             c_truncated_reward = chosen_reward[divergence_ind:end_ind]
             r_truncated_reward = rejected_reward[divergence_ind:end_ind]
-            chosen_mean_scores.append(chosen_reward[c_ind - 1])  #use the end score for refrnence
+            chosen_mean_scores.append(chosen_reward[c_ind - 1])  #use the end score for reference
             rejected_mean_scores.append(rejected_reward[r_ind - 1])
 
-            loss += -torch.log(torch.sigmoid(c_truncated_reward - r_truncated_reward)).mean()
+            loss += -torch.nn.functional.logsigmoid(c_truncated_reward - r_truncated_reward).mean()
 
         loss = loss / bs
         chosen_mean_scores = torch.stack(chosen_mean_scores)
@@ -121,13 +126,18 @@ class RewardModel(nn.Module):
                       prompt_length=0,
                       use_cache=False):
 
+        if self.config.model_type == "llama":
+            kwargs = dict()
+        else:
+            kwargs = dict(head_mask=head_mask)
+
         transformer_outputs = self.rwtranrsformer(
             input_ids,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
-            head_mask=head_mask,
             inputs_embeds=inputs_embeds,
-            use_cache=use_cache)
+            use_cache=use_cache,
+            **kwargs)
         hidden_states = transformer_outputs[0]
         values = self.v_head(hidden_states).squeeze(-1)
         if return_value_only:

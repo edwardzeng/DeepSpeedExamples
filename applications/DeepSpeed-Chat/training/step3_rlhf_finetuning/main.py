@@ -23,8 +23,9 @@ import torch
 from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 
+from torch.utils.tensorboard import SummaryWriter
+
 from transformers import (
-    AutoTokenizer,
     SchedulerType,
     default_data_collator,
 )
@@ -39,11 +40,14 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.
 
 from utils.data.data_utils import create_prompt_dataset, MiniDataset, DataCollatorRLHF, get_unsupervised_data
 from utils.utils import print_rank_0, to_device, save_hf_format, set_random_seed
-from utils.utils import get_all_reduce_mean, moving_average, save_zero_three_model
+from utils.utils import get_all_reduce_mean, moving_average, save_zero_three_model, load_hf_tokenizer
 from utils.module.lora import convert_lora_to_linear_layer
+
+writer = None
 
 
 def parse_args():
+    global writer
     parser = argparse.ArgumentParser(description="(Step 3) RLHF training arguments")
 
     parser.add_argument(
@@ -56,10 +60,10 @@ def parse_args():
     parser.add_argument(
         '--data_split',
         type=str,
-        default='6,2,2',
+        default='2,4,4',
         help=
         'Comma-separated list of proportions for training phase 1, 2, and 3 data. For example the split `2,4,4` '
-        'will use 60% of data for phase 1, 20% for phase 2 and 20% for phase 3.'
+        'will use 60%% of data for phase 1, 20%% for phase 2 and 20%% for phase 3.'
     )
     parser.add_argument(
         '--data_output_path',
@@ -162,13 +166,13 @@ def parse_args():
     parser.add_argument(
         "--actor_weight_decay",
         type=float,
-        default=0.1,
+        default=0.,
         help="Weight decay to use."
     )
     parser.add_argument(
         "--critic_weight_decay",
         type=float,
-        default=0.1,
+        default=0.,
         help="Weight decay to use."
     )
     parser.add_argument(
@@ -282,7 +286,16 @@ def parse_args():
     parser.add_argument(
         '--critic_gradient_checkpointing',
         action='store_true',
-        help='Enable HF gradient checkpointing for Critic model.'
+        help='Enable HF gradient checkpointing for Critic model.')
+    parser.add_argument(
+        '--disable_actor_dropout',
+        action='store_true',
+        help='Disable the dropout of the actor model.'
+    )
+    parser.add_argument(
+        '--disable_critic_dropout',
+        action='store_true',
+        help='Disable the dropout of the critical model.'
     )
     ## LoRA for efficient training setting
     parser.add_argument(
@@ -320,21 +333,64 @@ def parse_args():
         action='store_true',
         help='Enable EMA checkpoint for the model.'
     )
+    ## Tensorboard logging
+    parser.add_argument(
+        '--enable_tensorboard',
+        action='store_true',
+        help='Enable tensorboard logging'
+    )
+    parser.add_argument(
+        '--tensorboard_path',
+        type=str,
+        default="step3_tensorboard"
+    )
+    ## Actor/critic model overflow alignment
+    parser.add_argument(
+        '--align_overflow',
+        action='store_true',
+        help='Align loss scale overflow between actor and critic'
+    )
+    ## Print actor model answers during training
+    parser.add_argument(
+        '--print_answers',
+        action='store_true',
+        help='Print prompt and answers during training'
+    )
+    ## Testing
+    parser.add_argument(
+        '--enable_test_mode',
+        action='store_true',
+        help='Enable a testing mode that terminates training based on args.test_stop_step'
+    )
+    parser.add_argument(
+        "--test_stop_step",
+        type=int,
+        default=0,
+        help="Training step at which to terminate training during testing."
+    )
 
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
 
-    # Validate settings
-    if (args.actor_gradient_checkpointing
-            and args.actor_lora_dim > 0) or (args.critic_gradient_checkpointing and args.critic_lora_dim > 0):
-        assert (
-            not args.only_optimize_lora
-        ), "--{actor,critic}_gradient_checkpointing and --only_optimizer_lora cannot be enabled at the same time."
+    if args.enable_tensorboard:
+        print(f"Tensorboard logs going to: {args.tensorboard_path}/step3_tensorboard_logs")
+        writer = SummaryWriter(f"{args.tensorboard_path}/step3_tensorboard_logs")
 
+    # Validate settings
     if args.inference_tp_size > 1:
         assert (
             args.actor_zero_stage == 3
         ), "Zero stage 3 must be used to do Tensor sharding in the hybrid engine"
+
+    if args.actor_zero_stage == 2 and args.critic_zero_stage == 2 and args.enable_hybrid_engine and args.offload and args.actor_lora_dim == 0:
+        raise ValueError(
+            "The combination of [actor_zero_stage==2, critic_zero_stage==2, enable_hybrid_engine=True, offload=True, lora=False] is currently unsupported due to training instability!"
+        )
+
+    if args.actor_zero_stage == 3 and args.critic_zero_stage == 3 and args.enable_hybrid_engine and args.offload and args.actor_lora_dim > 0:
+        raise ValueError(
+            "The combination of [actor_zero_stage==3, critic_zero_stage==3, enable_hybrid_engine=True, offload=True, lora=True] is currently unsupported due to training instability!"
+        )
 
     return args
 
@@ -404,8 +460,6 @@ def main():
 
     args.global_rank = torch.distributed.get_rank()
 
-    assert not args.offload, "zero-offload is not currently supported but coming soon!"
-
     unsupervised_training_enabled = args.unsupervised_dataset_name and args.unsupervised_dataset_config_name
     if unsupervised_training_enabled:
         # if we enable unsupervised training, we need to double the batch size for actor model
@@ -417,10 +471,8 @@ def main():
     set_random_seed(args.seed)
     torch.distributed.barrier()
 
-    # create common tokenizer based on actor model
-    tokenizer = AutoTokenizer.from_pretrained(args.actor_model_name_or_path, fast_tokenizer=True)
-    tokenizer.pad_token = tokenizer.eos_token
-
+    # load_hf_tokenizer will get the correct tokenizer and set padding tokens based on the model family
+    tokenizer = load_hf_tokenizer(args.actor_model_name_or_path, fast_tokenizer=True)
     prompt_train_dataloader, unsuper_train_dataloader, num_total_iters = create_datasets(
         args=args, tokenizer=tokenizer, train_phase=3
     )
@@ -441,11 +493,11 @@ def main():
 
     # first number is how many experience-batch to generate
     # second number is the training batch size, which is the micro-batch size used
-    experience_mini_dataset = MiniDataset(
+    exp_mini_dataset = MiniDataset(
         max_size=args.generation_batch_numbers,
         small_batch_size=args.per_device_mini_train_batch_size
     )
-    unsupervised_mini_dataset = MiniDataset(
+    unsup_mini_dataset = MiniDataset(
         max_size=args.generation_batch_numbers,
         small_batch_size=args.per_device_mini_train_batch_size
     )
@@ -462,58 +514,72 @@ def main():
             batch_prompt = to_device(batch_prompt, device)
             if batch_unsuper is not None:
                 batch_unsuper = to_device(batch_unsuper, device)
-                unsupervised_dataset = unsupervised_mini_dataset.add(batch_unsuper)
+                unsup_dataset = unsup_mini_dataset.add(batch_unsuper)
             else:
-                unsupervised_dataset = unsupervised_mini_dataset.add([[None] * args.per_device_train_batch_size])
-
-            prompts = batch_prompt['prompt']
-            length = prompts.size(-1)
-            if length > args.max_prompt_seq_len:
-                prompts = prompts[:, length - args.max_prompt_seq_len:]
-                raise ValueError("Prompt length is too long")
+                unsup_dataset = unsup_mini_dataset.add([[None] * args.per_device_train_batch_size])
+            # prompts = batch_prompt['prompt']
+            # length = prompts.size(-1)
+            # if length > args.max_prompt_seq_len:
+            #     prompts = prompts[:, length - args.max_prompt_seq_len:]
+            #     raise ValueError("Prompt length is too long")
 
             # 用上一个epoch的actor模型根据prompt生成接下来PPO训练用的buffer数据
-            out = trainer.generate_experience(prompts)
-            experience_dataset = experience_mini_dataset.add(out)
+            out = trainer.generate_experience(batch_prompt['prompt'], batch_prompt['prompt_att_mask'], step)
+            exp_dataset = exp_mini_dataset.add(out)
 
-            if experience_dataset is not None:
-                critic_loss, actor_loss, unsuper_loss = 0, 0, 0
-                average_reward, inner_iter_count = 0
+            if exp_dataset is not None:
+                inner_iter = 0
+                actor_loss_sum, critic_loss_sum, unsup_loss_sum = 0, 0, 0
+                average_reward = 0
 
                 if args.actor_gradient_checkpointing:
                     rlhf_engine.actor.gradient_checkpointing_enable()
 
                 for ppo_ep in range(args.ppo_epochs):
-                    for exp_data, unsup_data in zip(experience_dataset, unsupervised_dataset):
+                    for exp_data, unsup_data in zip(exp_dataset, unsup_dataset):
                         actor_loss, critic_loss = trainer.train_rlhf(exp_data)
-                        critic_loss += actor_loss.item()
-                        actor_loss += critic_loss.item()
+                        actor_loss_sum += actor_loss.item()
+                        critic_loss_sum += critic_loss.item()
                         average_reward += exp_data["rewards"].mean()
 
                         if unsupervised_training_enabled:
                             unsup_loss = trainer.train_unsupervised(unsup_data, args.unsup_coef)
-                            unsuper_loss += unsup_loss.item()
+                            unsup_loss_sum += unsup_loss.item()
 
-                        inner_iter_count += 1
+                        inner_iter += 1
                         if args.enable_ema:
                             moving_average(rlhf_engine.actor, rlhf_engine.actor_ema, zero_stage=args.actor_zero_stage)
 
-                    random.shuffle(experience_dataset)
-                    random.shuffle(unsupervised_dataset)
+                    random.shuffle(exp_dataset)
+                    random.shuffle(unsup_dataset)
 
-                act_loss = actor_loss / inner_iter_count
-                cri_loss = critic_loss / inner_iter_count
-                unsuper_loss = unsuper_loss / inner_iter_count
+                act_loss = actor_loss_sum / inner_iter
+                cri_loss = critic_loss_sum / inner_iter
+                unsuper_loss = unsup_loss_sum / inner_iter
                 print_rank_0(
                     f'epoch: {epoch}|step: {step}|ppo_ep: {ppo_ep+1}|act_loss: {act_loss}|cri_loss: {cri_loss}|unsuper_loss: {unsuper_loss}',
-                    args.global_rank
-                )
+                    args.global_rank)
                 average_reward = get_all_reduce_mean(average_reward).item()
-                print_rank_0(f"average reward score: {average_reward / inner_iter_count}", args.global_rank)
+                print_rank_0(
+                    f"average reward score: {average_reward/inner_iter}",
+                    args.global_rank)
                 print_rank_0("-" * 80, args.global_rank)
+                if args.enable_tensorboard and torch.distributed.get_rank() == 0:
+                    writer.add_scalar('reward', average_reward / inner_iter, global_step=step)
+                    writer.add_scalar('actor_loss', actor_loss, global_step=step)
+                    writer.add_scalar('actor_loss_sum', actor_loss_sum, global_step=step)
+                    writer.add_scalar('critic_loss', critic_loss, global_step=step)
+                    writer.add_scalar('critic_loss_sum', critic_loss_sum, global_step=step)
+                    writer.flush()
 
             if args.actor_gradient_checkpointing:
                 rlhf_engine.actor.gradient_checkpointing_disable()
+
+            if args.enable_test_mode and step == args.test_stop_step:
+                break
+
+        if args.enable_test_mode:
+            break
 
     if args.output_dir is not None:
         print_rank_0('saving model ...')

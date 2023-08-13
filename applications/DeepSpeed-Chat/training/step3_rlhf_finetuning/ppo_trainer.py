@@ -51,32 +51,54 @@ class DeepSpeedPPOTrainer():
         self.args = args
         self.max_answer_seq_len = args.max_answer_seq_len
         self.end_of_conversation_token_id = self.tokenizer(args.end_of_conversation_token)['input_ids'][-1]
+        self.z3_enabled = args.actor_zero_stage == 3
 
         # Those value can be changed
-        self.kl_ctl = 0.02
+        self.kl_ctl = 0.1
         self.clip_reward_value = 5
         self.cliprange = 0.2
         self.cliprange_value = 0.2
         self.gamma = 1.0
         self.lam = 0.95
 
-    def _generate_sequence(self, prompts):
-        """generate sequence"""
+    def _generate_sequence(self, prompts, mask, step):
+        """_generate_sequence"""
         max_min_length = self.max_answer_seq_len + prompts.shape[1]
 
-        with torch.no_grad():
-            seq = self.actor_model.module.generate(prompts, max_length=max_min_length, min_length=max_min_length)
+        # This has been added due to a probability/nan error that happens after
+        # meta-llama/Llama-2-7b-hf enabled do_sample:
+        # https://huggingface.co/meta-llama/Llama-2-7b-hf/commit/6fdf2e60f86ff2481f2241aaee459f85b5b0bbb9
+        if self.actor_model.model.config.model_type == "llama":
+            kwargs = dict(do_sample=False)
+        else:
+            kwargs = dict()
 
-        # Filter out seq with no asnwers (or very short).
-        # This happens when users directly use the pre-training ckpt without supervised finetuning
+        with torch.no_grad():
+            seq = self.actor_model.module.generate(
+                prompts,
+                attention_mask=mask,
+                max_length=max_min_length,
+                pad_token_id=self.tokenizer.pad_token_id,
+                synced_gpus=self.z3_enabled,
+                **kwargs)
+
+        # Filter out seq with no answers (or very short). This happens when users directly use the pre-training ckpt without supervised finetuning
         # NOTE: this will causes each GPU has different number of examples
         batch_size = seq.shape[0]
         prompt_length = prompts.shape[1]
-
+        self.prompt_length = prompt_length
         # seq的结果包含了prompt本身，所以答案需要去除prompt
         ans = seq[:, prompt_length:]
-        self.prompt_length = prompt_length
         valid_ans_len = (ans != self.tokenizer.pad_token_id).sum(dim=-1)
+
+        if self.args.print_answers:
+            print(
+                f"--- prompt --> step={step}, rank={torch.distributed.get_rank()}, {self.tokenizer.batch_decode(prompts, skip_special_tokens=True)}"
+            )
+            print(
+                f"--- ans    --> step={step}, rank={torch.distributed.get_rank()}, {self.tokenizer.batch_decode(ans, skip_special_tokens=True)}"
+            )
+
         out_seq = []
         for i in range(batch_size):
             if valid_ans_len[i] <= 1:  # if the answer is shorter than 1 token, drop it
@@ -87,9 +109,9 @@ class DeepSpeedPPOTrainer():
 
         return out_seq
 
-    def generate_experience(self, prompts):
+    def generate_experience(self, prompts, mask, step):
         self.eval()
-        seq = self._generate_sequence(prompts)
+        seq = self._generate_sequence(prompts, mask, step)
         self.train()
 
         attention_mask = seq.not_equal(self.tokenizer.pad_token_id).long()
@@ -121,7 +143,7 @@ class DeepSpeedPPOTrainer():
         kl_divergence_estimate = -self.kl_ctl * (log_probs - ref_log_probs)
         rewards = kl_divergence_estimate
         start = prompts.shape[1] - 1
-        ends = start + action_mask[:, start:].sum(1)
+        ends = start + action_mask[:, start:].sum(1) + 1      # 为什么改成+1了？
         reward_clip = torch.clamp(reward_score, -self.clip_reward_value, self.clip_reward_value)
         batch_size = log_probs.shape[0]
         for j in range(batch_size):
@@ -146,6 +168,12 @@ class DeepSpeedPPOTrainer():
         old_values = values
         with torch.no_grad():
             old_rewards = self.compute_rewards(prompts, log_probs, ref_log_probs, reward_score, action_mask)
+            ends = start + action_mask[:, start:].sum(1) + 1
+            # we need to zero out the reward and value after the end of the conversation
+            # otherwise the advantage/return will be wrong
+            for i in range(old_rewards.shape[0]):
+                old_rewards[i, ends[i]:] = 0
+                old_values[i, ends[i]:] = 0
             advantages, returns = self.get_advantages_and_returns(old_values, old_rewards, start)
 
         ### process the new outputs
@@ -153,25 +181,45 @@ class DeepSpeedPPOTrainer():
 
         # actor_model
         actor_prob = self.actor_model(**batch, use_cache=False).logits
-        actor_log_prob = gather_log_probs(actor_prob[:, :-1, :], inputs['input_ids'][:, 1:])
+        actor_log_prob = gather_log_probs(actor_prob[:, :-1, :], seq[:, 1:])
         actor_loss = self.actor_loss_fn(
             actor_log_prob[:, start:],
-            log_probs[:, start:],
-            advantages,
+            log_probs[:, start:], advantages,
             action_mask[:, start:]
         )
         self.actor_model.backward(actor_loss)
-        self.actor_model.step()
+
+        if not self.args.align_overflow:
+            self.actor_model.step()
 
         # critic_model
-        value = self.critic_model.forward_value(**batch, return_value_only=True,  use_cache=False)[:, :-1]
-        critic_loss = self.critic_loss_fn(
-            value[:, start:],
-            old_values[:, start:],
-            returns,
-            action_mask[:, start:]
-        )
+        value = self.critic_model.forward_value(**batch, return_value_only=True, use_cache=False)[:, :-1]
+        critic_loss = self.critic_loss_fn(value[:, start:], old_values[:, start:], returns, action_mask[:, start:])
         self.critic_model.backward(critic_loss)
+
+        if self.args.align_overflow:
+            actor_overflow = self.actor_model.optimizer.check_overflow(
+                external=True)
+            critic_overflow = self.critic_model.optimizer.check_overflow(
+                external=True)
+
+            rank = torch.distributed.get_rank()
+            if actor_overflow and not critic_overflow:
+                self.critic_model.optimizer.skip_step = True
+                print_rank_0(
+                    "OVERFLOW: actor overflow, skipping both actor and critic steps",
+                    rank)
+            elif not actor_overflow and critic_overflow:
+                self.actor_model.optimizer.skip_step = True
+                print_rank_0(
+                    "OVERFLOW: critic overflow, skipping both actor and critic steps",
+                    rank)
+            elif actor_overflow and critic_overflow:
+                print_rank_0(
+                    "OVERFLOW: actor and critic overflow, skipping both actor and critic steps",
+                    rank)
+            self.actor_model.step()
+
         self.critic_model.step()
 
         return actor_loss, critic_loss

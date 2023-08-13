@@ -13,7 +13,6 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 
 from transformers import (
-    AutoTokenizer,
     SchedulerType,
     get_scheduler,
 )
@@ -26,9 +25,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.
 from utils.model.model_utils import create_critic_model
 from utils.data.data_utils import create_prompt_dataset, DataCollatorReward
 from utils.utils import print_rank_0, to_device, save_hf_format, set_random_seed, get_all_reduce_mean
-from utils.utils import get_optimizer_grouped_parameters, save_zero_three_model
+from utils.utils import get_optimizer_grouped_parameters, save_zero_three_model, load_hf_tokenizer
 from utils.ds_utils import get_train_ds_config
-from utils.module.lora import convert_linear_layer_to_lora, convert_lora_to_linear_layer, only_optimize_lora_parameters
+from utils.module.lora import convert_linear_layer_to_lora, convert_lora_to_linear_layer
+from utils.module.lora import only_optimize_lora_parameters, make_model_gradient_checkpointing_compatible
 
 
 def parse_args():
@@ -44,9 +44,9 @@ def parse_args():
     parser.add_argument(
         '--data_split',
         type=str,
-        default='6,2,2',
+        default='2,4,4',
         help='Comma-separated list of proportions for training'
-        'phase 1, 2, and 3 data. For example the split `2,4,4`'
+        'phase 1, 2, and 3 data. For example the split `6,2,2`'
         'will use 60% of data for phase 1, 20% for phase 2'
         'and 20% for phase 3.'
     )
@@ -108,6 +108,18 @@ def parse_args():
         help="Total number of training epochs to perform."
     )
     parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=0.,
+        help="Weight decay to use."
+    )
+    parser.add_argument(
+        "--num_train_epochs",
+        type=int,
+        default=1,
+        help="Total number of training epochs to perform."
+    )
+    parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
         default=1,
@@ -149,6 +161,11 @@ def parse_args():
         action='store_true',
         help='Enable HF gradient checkpointing for Actor model.'
     )
+    parser.add_argument(
+        '--disable_dropout',
+        action='store_true',
+        help='Disable the dropout of the model.'
+    )
     # deepspeed features
     parser.add_argument(
         '--offload',
@@ -179,14 +196,19 @@ def parse_args():
         action='store_true',
         help='Only optimize the LoRA parameters.'
     )
+    ## Tensorboard logging
+    parser.add_argument(
+        '--enable_tensorboard',
+        action='store_true',
+        help='Enable tensorboard logging'
+    )
+    parser.add_argument(
+        '--tensorboard_path',
+        type=str,
+        default="step2_tensorboard"
+    )
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
-
-    # Validate settings
-    if args.gradient_checkpointing and args.lora_dim > 0:
-        assert (
-            not args.only_optimize_lora
-        ), "--gradient_checkpointing and --only_optimizer_lora cannot be enabled at the same time."
 
     return args
 
@@ -205,27 +227,36 @@ def main():
 
     args.global_rank = torch.distributed.get_rank()
 
-    assert not args.offload, "zero-offload is not currently supported but coming soon!"
-
-    ds_config = get_train_ds_config(offload=args.offload, stage=args.zero_stage)
+    ds_config = get_train_ds_config(
+        offload=args.offload,
+        stage=args.zero_stage,
+        enable_tensorboard=args.enable_tensorboard,
+        tb_path=args.tensorboard_path,
+        tb_name="step2_model"
+    )
     ds_config['train_micro_batch_size_per_gpu'] = args.per_device_train_batch_size
     get_world_size = torch.distributed.get_world_size()
-    train_batch_size = args.per_device_train_batch_size * get_world_size * args.gradient_accumulation_steps
-    ds_config['train_batch_size'] = train_batch_size
+    ds_config['train_batch_size'] = args.per_device_train_batch_size * get_world_size * args.gradient_accumulation_steps
 
     # If passed along, set the training seed now.
     set_random_seed(args.seed)
     torch.distributed.barrier()
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, fast_tokenizer=True)
-    tokenizer.pad_token = tokenizer.eos_token
-
-    model = create_critic_model(args.model_name_or_path, tokenizer, ds_config, args.num_padding_at_beginning)
+    # load_hf_tokenizer will get the correct tokenizer and set padding tokens based on the model family
+    tokenizer = load_hf_tokenizer(args.model_name_or_path, fast_tokenizer=True)
+    model = create_critic_model(
+        args.model_name_or_path,
+        tokenizer,
+        ds_config,
+        args.num_padding_at_beginning,
+        disable_dropout=args.disable_dropout
+    )
 
     if args.lora_dim > 0:
         model = convert_linear_layer_to_lora(model, args.lora_module_name, args.lora_dim)
         if args.only_optimize_lora:
             model = only_optimize_lora_parameters(model)
+            model = make_model_gradient_checkpointing_compatible(model)
 
     train_phase = 2
     train_dataset, eval_dataset = create_prompt_dataset(
@@ -278,8 +309,8 @@ def main():
             scores += outputs["chosen_mean_scores"].mean().float()
             if step == 99:  # For faster evaluation and debugging
                 break
-            acc = correct_predictions / total_predictions
-            scores = scores / (step + 1)
+        acc = correct_predictions / total_predictions
+        scores = scores / (step + 1)
         try:
             acc = get_all_reduce_mean(acc).item()
             scores = get_all_reduce_mean(scores).item()

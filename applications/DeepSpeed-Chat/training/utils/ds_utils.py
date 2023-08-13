@@ -12,7 +12,11 @@ def get_train_ds_config(offload,
                         inference_tp_size=1,
                         release_inference_cache=False,
                         pin_parameters=True,
-                        tp_gather_partition_size=8):
+                        tp_gather_partition_size=8,
+                        max_out_tokens=512,
+                        enable_tensorboard=False,
+                        tb_path="",
+                        tb_name=""):
 
     device = "cpu" if offload else "none"
     zero_opt_dict = {
@@ -42,10 +46,16 @@ def get_train_ds_config(offload,
         "wall_clock_breakdown": False,
         "hybrid_engine": {
             "enabled": enable_hybrid_engine,
+            "max_out_tokens": max_out_tokens,
             "inference_tp_size": inference_tp_size,
             "release_inference_cache": release_inference_cache,
             "pin_parameters": pin_parameters,
             "tp_gather_partition_size": tp_gather_partition_size,
+        },
+        "tensorboard": {
+            "enabled": enable_tensorboard,
+            "output_path": f"{tb_path}/ds_tensorboard_logs/",
+            "job_name": f"{tb_name}_tensorboard"
         }
     }
 
