@@ -441,8 +441,14 @@ def main():
 
     # first number is how many experience-batch to generate
     # second number is the training batch size, which is the micro-batch size used
-    experience_mini_dataset = MiniDataset(args.generation_batch_numbers, args.per_device_mini_train_batch_size)
-    unsupervised_mini_dataset = MiniDataset(args.generation_batch_numbers, args.per_device_mini_train_batch_size)
+    experience_mini_dataset = MiniDataset(
+        max_size=args.generation_batch_numbers,
+        small_batch_size=args.per_device_mini_train_batch_size
+    )
+    unsupervised_mini_dataset = MiniDataset(
+        max_size=args.generation_batch_numbers,
+        small_batch_size=args.per_device_mini_train_batch_size
+    )
 
     # Train!
     print_rank_0("***** Running training *****", args.global_rank)
