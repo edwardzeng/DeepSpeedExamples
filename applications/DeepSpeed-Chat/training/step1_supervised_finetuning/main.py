@@ -76,13 +76,13 @@ def parse_args():
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
-        default=16,
+        default=4,
         help="Batch size (per device) for the training dataloader.",
     )
     parser.add_argument(
         "--per_device_eval_batch_size",
         type=int,
-        default=16,
+        default=1,
         help="Batch size (per device) for the evaluation dataloader.",
     )
     parser.add_argument(
@@ -96,18 +96,6 @@ def parse_args():
         type=float,
         default=1e-3,
         help="Initial learning rate (after the potential warmup period) to use.",
-    )
-    parser.add_argument(
-        "--weight_decay",
-        type=float,
-        default=0.1,
-        help="Weight decay to use."
-    )
-    parser.add_argument(
-        "--num_train_epochs",
-        type=int,
-        default=1,
-        help="Total number of training epochs to perform."
     )
     parser.add_argument(
         "--weight_decay",
