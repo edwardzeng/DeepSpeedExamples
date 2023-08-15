@@ -61,7 +61,7 @@ class RewardModel(nn.Module):
 
         # Split the inputs and rewards into two parts, chosen and rejected
         assert len(input_ids.shape) == 2
-        bs = input_ids.shape[0] // 2
+        bs = input_ids.shape[0] // 2    # 见DataCollatorReward的处理
         seq_len = input_ids.shape[1]
 
         chosen_ids = input_ids[:bs]  # bs x seq x 1
@@ -97,13 +97,16 @@ class RewardModel(nn.Module):
                 else:
                     r_ind = seq_len
                 end_ind = max(c_ind, r_ind)
-                divergence_ind = check_divergence[0]
+                divergence_ind = check_divergence[0]     # 第一个开始不一致的位置，一般就是前面的prompt是一致的，后面的开始不一致
+
             assert divergence_ind > 0
+
             c_truncated_reward = chosen_reward[divergence_ind:end_ind]
             r_truncated_reward = rejected_reward[divergence_ind:end_ind]
             chosen_mean_scores.append(chosen_reward[c_ind - 1])  #use the end score for reference
             rejected_mean_scores.append(rejected_reward[r_ind - 1])
 
+            # 每一个答案的token的分数差异？为什么不是整个句子的
             loss += -torch.nn.functional.logsigmoid(c_truncated_reward - r_truncated_reward).mean()
 
         loss = loss / bs

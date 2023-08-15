@@ -56,6 +56,10 @@ def create_critic_model(model_name_or_path,
                         zero_stage=0):
     # OPT model family always put a padding token at the beginning of the sequence,
     # we did not see this in other models but not sure if it is a general rule
+    # 解释说明：https://github.com/microsoft/DeepSpeedExamples/issues/455
+    # It is actually not a padding token, but the bos token. Just happen to be the case that bos_token_id is equal to
+    # pad_token_id for opt models, i.e., both tokenizer.pad_token_id and tokenizer.bos_token_id equal to 2 for opt
+    # models. But these two ids can differ in other models.
 
     import time
 
